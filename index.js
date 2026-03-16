@@ -14,52 +14,80 @@ app.post('/portal/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'credentials required' });
-
     const cleanUser = username.includes('@') ? username.split('@')[0] : username;
 
+    // Step 1: POST to loginAuth.php
     const loginRes = await fetch(`${PORTAL}/loginAuth.php`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': `${PORTAL}/index.php`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0',
+        'Referer': `${PORTAL}/`,
         'Origin': PORTAL,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
       body: new URLSearchParams({
         username: cleanUser,
-        password,
+        password: password,
         modstring: '',
         LogIn: 'Log in',
       }).toString(),
       redirect: 'manual',
     });
 
-    const setCookieHeaders = loginRes.headers.raw()['set-cookie'] || [];
-    const cookieHeader = setCookieHeaders.map(c => c.split(';')[0]).join('; ');
+    // Step 2: Collect all cookies from redirect chain
+    const allCookies = [];
+    const rawSetCookie = loginRes.headers.raw()['set-cookie'] || [];
+    rawSetCookie.forEach(c => {
+      const part = c.split(';')[0].trim();
+      if (part) allCookies.push(part);
+    });
 
-    if (!cookieHeader || !cookieHeader.includes('PHPSESSID')) {
-      return res.status(401).json({ error: 'Login failed. Check credentials.' });
+    // Step 3: Follow redirect manually
+    const location = loginRes.headers.get('location');
+    if (location) {
+      const redirectUrl = location.startsWith('http') ? location : `${PORTAL}/${location.replace(/^\//, '')}`;
+      const redirectRes = await fetch(redirectUrl, {
+        headers: {
+          'Cookie': allCookies.join('; '),
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        redirect: 'manual',
+      });
+      const moreCookies = redirectRes.headers.raw()['set-cookie'] || [];
+      moreCookies.forEach(c => {
+        const part = c.split(';')[0].trim();
+        if (part && !allCookies.includes(part)) allCookies.push(part);
+      });
     }
 
+    const cookieHeader = allCookies.join('; ');
+    
+    if (!cookieHeader.includes('PHPSESSID') && !cookieHeader.includes('uname')) {
+      return res.status(401).json({ error: 'Login failed', cookieDebug: cookieHeader });
+    }
+
+    // Step 4: Fetch home page
     const homeRes = await fetch(`${PORTAL}/index.php`, {
       headers: {
         'Cookie': cookieHeader,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     });
-
     const html = await homeRes.text();
-    
-    // Debug: return first 3000 chars of HTML
-    if (req.query.debug) {
-      return res.json({ html: html.substring(0, 3000) });
-    }
+
+    if (req.query.debug) return res.json({ html: html.substring(0, 4000), cookies: cookieHeader });
 
     const student = parseProfile(html);
-    const curriculumHtml = await fetchPage(`${PORTAL}/index.php?mod=course_struct`, cookieHeader);
-    const curriculum = parseCurriculum(curriculumHtml);
-    const gradesHtml = await fetchPage(`${PORTAL}/index.php?mod=transcript`, cookieHeader);
-    const grades = parseGrades(gradesHtml);
+
+    // Step 5: Fetch curriculum
+    const currHtml = await fetchPage(`${PORTAL}/index.php?mod=course_struct`, cookieHeader);
+    const curriculum = parseCurriculum(currHtml);
+
+    // Step 6: Fetch grades/transcript
+    const gradeHtml = await fetchPage(`${PORTAL}/index.php?mod=transcript`, cookieHeader);
+    const grades = parseGrades(gradeHtml);
 
     res.json({ success: true, student, curriculum, grades });
   } catch (err) {
@@ -78,17 +106,20 @@ async function fetchPage(url, cookie) {
 }
 
 function parseProfile(html) {
-  function getField(label) {
-    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(escaped + '[^<]*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,120})', 'i');
-    const m = html.match(re);
-    return m ? m[1].trim() : null;
+  function getField(...labels) {
+    for (const label of labels) {
+      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(escaped + '[^<]*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,200})', 'i');
+      const m = html.match(re);
+      if (m && m[1].trim()) return m[1].trim();
+    }
+    return null;
   }
 
-  const name = getField('Fullname') || getField('Name Surname') || getField('Full Name');
-  const program = getField('Program / Class') || getField('Program') || getField('Major Program');
-  const email = getField('Email') || getField('E-mail');
-  const studentId = getField('Student') || getField('Student ID') || getField('Student №');
+  const name = getField('Fullname', 'Name Surname', 'Full name');
+  const program = getField('Program / Class', 'Major Program', 'Program');
+  const email = getField('Email', 'E-mail');
+  const studentId = getField('Student №', 'Student No', 'Student ID', 'Student');
 
   let major = null, year = null;
   if (program) {
@@ -103,11 +134,11 @@ function parseProfile(html) {
     }
   }
 
-  const photoMatch = html.match(/stud_photo\.php\?[^"'\s]+/);
+  const photoMatch = html.match(/stud_photo\.php\?[^"'\s>]+/);
   const photo = photoMatch ? `${PORTAL}/${photoMatch[0]}` : null;
 
-  const gpaMatch = html.match(/[\d]+\.[\d]+/);
-  const gpa = gpaMatch ? gpaMatch[0] : null;
+  const gpaMatch = html.match(/GPA[^<\d]*([\d]+\.[\d]+)/i);
+  const gpa = gpaMatch ? gpaMatch[1] : null;
 
   return { name, major, year, email, studentId, photo, gpa };
 }
@@ -116,23 +147,16 @@ function parseCurriculum(html) {
   if (!html) return [];
   const courses = [];
   const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-  while ((rowMatch = rowRe.exec(html)) !== null) {
-    const row = rowMatch[1];
+  let m;
+  while ((m = rowRe.exec(html)) !== null) {
     const cells = [];
     const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    let cellMatch;
-    while ((cellMatch = cellRe.exec(row)) !== null) {
-      cells.push(cellMatch[1].replace(/<[^>]+>/g, '').trim());
+    let c;
+    while ((c = cellRe.exec(m[1])) !== null) {
+      cells.push(c[1].replace(/<[^>]+>/g, '').trim());
     }
-    if (cells.length >= 4 && cells[1] && cells[1].match(/^[A-Z]{2,4}\s*\d+/)) {
-      courses.push({
-        code: cells[1],
-        name: cells[2] || '',
-        credits: cells[4] || '',
-        grade: cells[6] || '',
-        status: cells[8] || '',
-      });
+    if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\s*\d+/.test(cells[1])) {
+      courses.push({ code: cells[1], name: cells[2] || '', credits: cells[4] || '', grade: cells[6] || '', status: cells[8] || '' });
     }
   }
   return courses;
@@ -142,24 +166,16 @@ function parseGrades(html) {
   if (!html) return [];
   const grades = [];
   const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-  while ((rowMatch = rowRe.exec(html)) !== null) {
-    const row = rowMatch[1];
+  let m;
+  while ((m = rowRe.exec(html)) !== null) {
     const cells = [];
     const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    let cellMatch;
-    while ((cellMatch = cellRe.exec(row)) !== null) {
-      cells.push(cellMatch[1].replace(/<[^>]+>/g, '').trim());
+    let c;
+    while ((c = cellRe.exec(m[1])) !== null) {
+      cells.push(c[1].replace(/<[^>]+>/g, '').trim());
     }
-    if (cells.length >= 3 && cells[0] && cells[0].match(/^\d+$/)) {
-      grades.push({
-        semester: cells[1] || '',
-        code: cells[2] || '',
-        name: cells[3] || '',
-        credits: cells[4] || '',
-        grade: cells[5] || '',
-        gpa: cells[6] || '',
-      });
+    if (cells.length >= 3 && /^\d+$/.test(cells[0])) {
+      grades.push({ semester: cells[1] || '', code: cells[2] || '', name: cells[3] || '', credits: cells[4] || '', grade: cells[5] || '', gpa: cells[6] || '' });
     }
   }
   return grades;

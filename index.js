@@ -134,13 +134,29 @@ function parseCurriculum(html) {
 function parseGrades(html) {
   if (!html) return [];
   const grades = [];
-  (html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || []).forEach(function(row) {
+  let currentSemester = '';
+  const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+  rows.forEach(function(row) {
+    if (row.includes('colspan="8"') || row.includes("colspan='8'")) {
+      const semMatch = row.match(/(\d{4}\s*-\s*\d{4}\.?\s*\d+)/);
+      if (semMatch) currentSemester = semMatch[1].trim();
+      return;
+    }
     const cells = [];
     (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || []).forEach(function(cell) {
       cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').replace(/\s+/g, ' ').trim());
     });
-    if (cells.length >= 5 && /^\d+$/.test(cells[0]) && cells[2] && /^[A-Z]{2,4}\s*\d+/.test(cells[2])) {
-      grades.push({ no: cells[0], code: cells[2], name: cells[3]||'', credits: cells[4]||'', score: cells[5]||'', grade: cells[6]||'', gpa: cells[7]||'', status: cells[8]||'' });
+    if (cells.length >= 6 && cells[0] && /^[A-Z]{2,4}\s*\d+/.test(cells[0])) {
+      grades.push({
+        semester: currentSemester,
+        code: cells[0],
+        name: cells[1] || '',
+        credits: cells[3] || '',
+        score: cells[4] || '',
+        grade: cells[5] || '',
+        gpa: cells[6] || '',
+        status: cells[7] || '',
+      });
     }
   });
   return grades;

@@ -31,39 +31,22 @@ app.post('/portal/login', async (req, res) => {
 
     const r1 = await fetch(PORTAL + '/', { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' });
     parseCookies(r1.headers);
-
     const r2 = await fetch(PORTAL + '/loginAuth.php', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': PORTAL + '/index.php',
-        'Origin': PORTAL,
-        'Cookie': cookieStr(),
-      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/index.php', 'Origin': PORTAL, 'Cookie': cookieStr() },
       body: new URLSearchParams({ username: cleanUser, password, modstring: '', LogIn: 'Log in' }).toString(),
       redirect: 'manual',
     });
     parseCookies(r2.headers);
 
-    if (!jar['uname']) {
-      return res.status(401).json({ error: 'Login failed. Wrong credentials.' });
-    }
+    if (!jar['uname']) return res.status(401).json({ error: 'Login failed. Wrong credentials.' });
 
-    // Fetch profile page
-    const profileRes = await fetch(PORTAL + '/index.php?mod=profile', {
-      headers: { 'Cookie': cookieStr(), 'User-Agent': 'Mozilla/5.0' },
-    });
-    const profileHtml = await profileRes.text();
-    const student = parseProfile(profileHtml);
-
-    // Fetch curriculum
+    const profileHtml = await fetchPage(PORTAL + '/index.php?mod=profile', cookieStr());
+    const transcriptHtml = await fetchPage(PORTAL + '/index.php?mod=transcript', cookieStr());
+    const student = parseProfile(profileHtml, transcriptHtml);
     const currHtml = await fetchPage(PORTAL + '/index.php?mod=course_struct', cookieStr());
     const curriculum = parseCurriculum(currHtml);
-
-    // Fetch grades
-    const gradeHtml = await fetchPage(PORTAL + '/index.php?mod=transkript', cookieStr());
-    const grades = parseGrades(gradeHtml);
+    const grades = parseGrades(transcriptHtml);
 
     res.json({ success: true, student, curriculum, grades });
   } catch (err) {
@@ -79,7 +62,7 @@ async function fetchPage(url, cookie) {
   } catch { return ''; }
 }
 
-function parseProfile(html) {
+function parseProfile(html, transcriptHtml) {
   function getField(label) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp(escaped + '\\s*:\\s*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,200})', 'i');
@@ -88,32 +71,43 @@ function parseProfile(html) {
   }
 
   const name = getField('Name Surname');
-  const program = getField('Major Program');
+  const programRaw = getField('Major Program');
   const email = getField('Email');
-  const studentId = getField('Student');
 
+  // Translate Kazakh program name to English
   let major = null, year = null;
-  if (program) {
-    // "Бағдарламалық қамтамасыз ету-EN / 2024" → extract year from 2024
-    const yearMatch = program.match(/\/\s*(\d{4})/);
+  if (programRaw) {
+    const yearMatch = programRaw.match(/\/\s*(\d{4})/);
     if (yearMatch) {
       const startYear = parseInt(yearMatch[1]);
       const currentYear = new Date().getFullYear();
-      const n = currentYear - startYear + 1;
+      const n = Math.max(1, currentYear - startYear + 1);
       year = n + (['st','nd','rd'][n-1]||'th') + ' Year';
     }
-    // Extract major — remove year part
-    major = program.replace(/[-–]\s*EN.*$/i, '').replace(/\/\s*\d{4}.*$/, '').trim();
-    if (program.includes('EN')) major = major + ' (EN)';
+    if (programRaw.includes('EN')) {
+      major = 'Software Engineering (EN)';
+    } else if (programRaw.includes('RU')) {
+      major = 'Software Engineering (RU)';
+    } else if (programRaw.includes('KZ')) {
+      major = 'Software Engineering (KZ)';
+    } else {
+      major = programRaw.replace(/\/\s*\d{4}.*$/, '').trim();
+    }
   }
 
   const photoMatch = html.match(/stud_photo\.php\?[^"'\s>]+/);
   const photo = photoMatch ? PORTAL + '/' + photoMatch[0] : null;
 
-  const gpaMatch = html.match(/GPA[^<\d]*([\d]+\.[\d]+)/i);
-  const gpa = gpaMatch ? gpaMatch[1] : null;
+  // Get GPA from transcript
+  let gpa = null;
+  if (transcriptHtml) {
+    const gpaMatch = transcriptHtml.match(/Cumulative\s+GPA[^<\d]*([\d]+\.[\d]+)/i) ||
+                     transcriptHtml.match(/GPA[^<\d]*([\d]+\.[\d]+)/i) ||
+                     transcriptHtml.match(/([\d]+\.[\d]+)\s*<\/td>\s*<\/tr>\s*<\/table>/i);
+    if (gpaMatch) gpa = gpaMatch[1];
+  }
 
-  return { name, major, year, email, studentId, photo, gpa };
+  return { name, major, year, email, photo, gpa };
 }
 
 function parseCurriculum(html) {
@@ -122,17 +116,15 @@ function parseCurriculum(html) {
   const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
   rows.forEach(function(row) {
     const cells = [];
-    const cellMatches = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
-    cellMatches.forEach(function(cell) {
-      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').trim());
+    (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || []).forEach(function(cell) {
+      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').replace(/\s+/g, ' ').trim());
     });
     if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\s*\d+/.test(cells[1])) {
-      const grade = (cells[6] || '').replace(/\s+/g, ' ').trim();
       courses.push({
         code: cells[1],
         name: cells[2] || '',
-        credits: cells[4] || '',
-        grade: grade,
+        credits: (cells[4] || '').replace(/\+0$/, ''),
+        grade: (cells[6] || '').replace(/\s+/g, ' ').trim(),
         status: (cells[8] || '').replace(/\s+/g, ' ').trim(),
       });
     }
@@ -146,9 +138,8 @@ function parseGrades(html) {
   const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
   rows.forEach(function(row) {
     const cells = [];
-    const cellMatches = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
-    cellMatches.forEach(function(cell) {
-      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').trim());
+    (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || []).forEach(function(cell) {
+      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').replace(/\s+/g, ' ').trim());
     });
     if (cells.length >= 5 && /^\d+$/.test(cells[0])) {
       grades.push({

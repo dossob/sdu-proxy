@@ -25,15 +25,16 @@ app.post('/portal/login', async (req, res) => {
         if (eqIdx > 0) jar[pair.substring(0, eqIdx).trim()] = pair.substring(eqIdx + 1).trim();
       });
     }
-    function cookieStr() {
-      return Object.entries(jar).map(([k,v]) => k+'='+v).join('; ');
-    }
+    function cs() { return Object.entries(jar).map(([k,v]) => k+'='+v).join('; '); }
 
+    // Step 1: GET homepage
     const r1 = await fetch(PORTAL + '/', { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' });
     parseCookies(r1.headers);
+
+    // Step 2: POST login
     const r2 = await fetch(PORTAL + '/loginAuth.php', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/index.php', 'Origin': PORTAL, 'Cookie': cookieStr() },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cs(), 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/', 'Origin': PORTAL },
       body: new URLSearchParams({ username: cleanUser, password, modstring: '', LogIn: 'Log in' }).toString(),
       redirect: 'manual',
     });
@@ -41,10 +42,20 @@ app.post('/portal/login', async (req, res) => {
 
     if (!jar['uname']) return res.status(401).json({ error: 'Login failed. Wrong credentials.' });
 
-    const profileHtml = await fetchPage(PORTAL + '/index.php?mod=profile', cookieStr());
-    const transcriptHtml = await fetchPage(PORTAL + '/index.php?mod=transcript', cookieStr());
+    // Step 3: Follow redirect to index.php (important!)
+    await fetch(PORTAL + '/index.php', {
+      headers: { 'Cookie': cs(), 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/loginAuth.php' },
+      redirect: 'manual',
+    });
+
+    // Step 4: Fetch all pages in parallel
+    const [profileHtml, transcriptHtml, currHtml] = await Promise.all([
+      fetchPage(PORTAL + '/index.php?mod=profile', cs()),
+      fetchPage(PORTAL + '/index.php?mod=transkript', cs()),
+      fetchPage(PORTAL + '/index.php?mod=course_struct', cs()),
+    ]);
+
     const student = parseProfile(profileHtml, transcriptHtml);
-    const currHtml = await fetchPage(PORTAL + '/index.php?mod=course_struct', cookieStr());
     const curriculum = parseCurriculum(currHtml);
     const grades = parseGrades(transcriptHtml);
 
@@ -57,7 +68,7 @@ app.post('/portal/login', async (req, res) => {
 
 async function fetchPage(url, cookie) {
   try {
-    const res = await fetch(url, { headers: { 'Cookie': cookie, 'User-Agent': 'Mozilla/5.0' } });
+    const res = await fetch(url, { headers: { 'Cookie': cookie, 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/index.php' } });
     return await res.text();
   } catch { return ''; }
 }
@@ -69,42 +80,32 @@ function parseProfile(html, transcriptHtml) {
     const m = html.match(re);
     return m ? m[1].trim() : null;
   }
-
   const name = getField('Name Surname');
   const programRaw = getField('Major Program');
   const email = getField('Email');
 
-  // Translate Kazakh program name to English
   let major = null, year = null;
   if (programRaw) {
     const yearMatch = programRaw.match(/\/\s*(\d{4})/);
     if (yearMatch) {
-      const startYear = parseInt(yearMatch[1]);
-      const currentYear = new Date().getFullYear();
-      const n = Math.max(1, currentYear - startYear + 1);
+      const n = Math.max(1, new Date().getFullYear() - parseInt(yearMatch[1]) + 1);
       year = n + (['st','nd','rd'][n-1]||'th') + ' Year';
     }
-    if (programRaw.includes('EN')) {
-      major = 'Software Engineering (EN)';
-    } else if (programRaw.includes('RU')) {
-      major = 'Software Engineering (RU)';
-    } else if (programRaw.includes('KZ')) {
-      major = 'Software Engineering (KZ)';
-    } else {
-      major = programRaw.replace(/\/\s*\d{4}.*$/, '').trim();
-    }
+    major = programRaw.includes('EN') ? 'Software Engineering (EN)' :
+            programRaw.includes('RU') ? 'Software Engineering (RU)' :
+            programRaw.includes('KZ') ? 'Software Engineering (KZ)' :
+            programRaw.replace(/\/\s*\d{4}.*$/, '').trim();
   }
 
   const photoMatch = html.match(/stud_photo\.php\?[^"'\s>]+/);
   const photo = photoMatch ? PORTAL + '/' + photoMatch[0] : null;
 
-  // Get GPA from transcript
+  // GPA from transcript
   let gpa = null;
   if (transcriptHtml) {
-    const gpaMatch = transcriptHtml.match(/Cumulative\s+GPA[^<\d]*([\d]+\.[\d]+)/i) ||
-                     transcriptHtml.match(/GPA[^<\d]*([\d]+\.[\d]+)/i) ||
-                     transcriptHtml.match(/([\d]+\.[\d]+)\s*<\/td>\s*<\/tr>\s*<\/table>/i);
-    if (gpaMatch) gpa = gpaMatch[1];
+    const m = transcriptHtml.match(/Grand\s+(?:Average\s+)?GPA\s*:\s*([\d.]+)/i) ||
+              transcriptHtml.match(/GPA\s*:\s*([\d.]+)/i);
+    if (m) gpa = m[1];
   }
 
   return { name, major, year, email, photo, gpa };
@@ -113,19 +114,17 @@ function parseProfile(html, transcriptHtml) {
 function parseCurriculum(html) {
   if (!html) return [];
   const courses = [];
-  const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
-  rows.forEach(function(row) {
+  (html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || []).forEach(function(row) {
     const cells = [];
     (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || []).forEach(function(cell) {
       cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').replace(/\s+/g, ' ').trim());
     });
     if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\s*\d+/.test(cells[1])) {
       courses.push({
-        code: cells[1],
-        name: cells[2] || '',
-        credits: (cells[4] || '').replace(/\+0$/, ''),
-        grade: (cells[6] || '').replace(/\s+/g, ' ').trim(),
-        status: (cells[8] || '').replace(/\s+/g, ' ').trim(),
+        code: cells[1], name: cells[2]||'',
+        credits: (cells[4]||'').replace(/\+0$/,''),
+        grade: (cells[6]||'').replace(/\s+/g,' ').trim(),
+        status: (cells[8]||'').replace(/\s+/g,' ').trim(),
       });
     }
   });
@@ -135,22 +134,13 @@ function parseCurriculum(html) {
 function parseGrades(html) {
   if (!html) return [];
   const grades = [];
-  const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
-  rows.forEach(function(row) {
+  (html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || []).forEach(function(row) {
     const cells = [];
     (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || []).forEach(function(cell) {
       cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').replace(/\s+/g, ' ').trim());
     });
-    if (cells.length >= 5 && /^\d+$/.test(cells[0])) {
-      grades.push({
-        no: cells[0],
-        semester: cells[1] || '',
-        code: cells[2] || '',
-        name: cells[3] || '',
-        credits: cells[4] || '',
-        grade: cells[5] || '',
-        gpa: cells[6] || '',
-      });
+    if (cells.length >= 5 && /^\d+$/.test(cells[0]) && cells[2] && /^[A-Z]{2,4}\s*\d+/.test(cells[2])) {
+      grades.push({ no: cells[0], code: cells[2], name: cells[3]||'', credits: cells[4]||'', score: cells[5]||'', grade: cells[6]||'', gpa: cells[7]||'', status: cells[8]||'' });
     }
   });
   return grades;

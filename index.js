@@ -45,7 +45,7 @@ app.post('/portal/login', async (req, res) => {
     // Step 3: Follow redirect to index.php (important!)
     await fetch(PORTAL + '/index.php', {
       headers: { 'Cookie': cs(), 'User-Agent': 'Mozilla/5.0', 'Referer': PORTAL + '/loginAuth.php' },
-      redirect: 'manual',
+      redirect: 'follow',
     });
 
     // Step 4: Fetch all pages in parallel

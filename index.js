@@ -88,7 +88,7 @@ function parseProfile(html, transcriptHtml) {
   if (programRaw) {
     const yearMatch = programRaw.match(/\/\s*(\d{4})/);
     if (yearMatch) {
-      const n = Math.max(1, new Date().getFullYear() - parseInt(yearMatch[1]) + 1);
+      const _cy = new Date().getFullYear(); const _cm = new Date().getMonth() + 1; const _ay = _cm >= 9 ? _cy : _cy - 1; const n = Math.max(1, _ay - parseInt(yearMatch[1]) + 1);
       year = n + (['st','nd','rd'][n-1]||'th') + ' Year';
     }
     major = programRaw.includes('EN') ? 'Software Engineering (EN)' :

@@ -8,10 +8,8 @@ app.use(cors());
 
 const PORTAL = 'https://my.sdu.edu.kz';
 
-// Health check
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'sdu-proxy' }));
 
-// Login + get profile
 app.post('/portal/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -46,25 +44,27 @@ app.post('/portal/login', async (req, res) => {
     const homeRes = await fetch(`${PORTAL}/index.php`, {
       headers: {
         'Cookie': cookieHeader,
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     });
 
     const html = await homeRes.text();
-    const student = parseProfile(html);
+    
+    // Debug: return first 3000 chars of HTML
+    if (req.query.debug) {
+      return res.json({ html: html.substring(0, 3000) });
+    }
 
-    // Get curriculum
+    const student = parseProfile(html);
     const curriculumHtml = await fetchPage(`${PORTAL}/index.php?mod=course_struct`, cookieHeader);
     const curriculum = parseCurriculum(curriculumHtml);
-
-    // Get grades
     const gradesHtml = await fetchPage(`${PORTAL}/index.php?mod=transcript`, cookieHeader);
     const grades = parseGrades(gradesHtml);
 
     res.json({ success: true, student, curriculum, grades });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Could not connect to SDU Portal' });
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -85,10 +85,10 @@ function parseProfile(html) {
     return m ? m[1].trim() : null;
   }
 
-  const name = getField('Fullname');
-  const program = getField('Program / Class') || getField('Program');
-  const email = getField('Email');
-  const studentId = getField('Student');
+  const name = getField('Fullname') || getField('Name Surname') || getField('Full Name');
+  const program = getField('Program / Class') || getField('Program') || getField('Major Program');
+  const email = getField('Email') || getField('E-mail');
+  const studentId = getField('Student') || getField('Student ID') || getField('Student №');
 
   let major = null, year = null;
   if (program) {
@@ -106,8 +106,8 @@ function parseProfile(html) {
   const photoMatch = html.match(/stud_photo\.php\?[^"'\s]+/);
   const photo = photoMatch ? `${PORTAL}/${photoMatch[0]}` : null;
 
-  const gpaMatch = html.match(/GPA[^>]*>\s*([\d.]+)/i);
-  const gpa = gpaMatch ? gpaMatch[1] : null;
+  const gpaMatch = html.match(/[\d]+\.[\d]+/);
+  const gpa = gpaMatch ? gpaMatch[0] : null;
 
   return { name, major, year, email, studentId, photo, gpa };
 }

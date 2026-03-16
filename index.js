@@ -21,15 +21,19 @@ app.post('/portal/login', async (req, res) => {
       const raw = headers.raw()['set-cookie'] || [];
       raw.forEach(c => {
         const [pair] = c.split(';');
-        const [k, v] = pair.split('=');
-        if (k && v !== undefined) jar[k.trim()] = v.trim();
+        const eqIdx = pair.indexOf('=');
+        if (eqIdx > 0) {
+          const k = pair.substring(0, eqIdx).trim();
+          const v = pair.substring(eqIdx + 1).trim();
+          jar[k] = v;
+        }
       });
     }
     function cookieStr() {
       return Object.entries(jar).map(([k,v]) => `${k}=${v}`).join('; ');
     }
 
-    // Step 1: GET login page → get initial PHPSESSID
+    // Step 1: GET login page
     const r1 = await fetch(`${PORTAL}/`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       redirect: 'follow',
@@ -41,8 +45,9 @@ app.post('/portal/login', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': `${PORTAL}/`,
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+        'Referer': `${PORTAL}/index.php`,
+        'Origin': PORTAL,
         'Cookie': cookieStr(),
       },
       body: new URLSearchParams({ username: cleanUser, password, modstring: '', LogIn: 'Log in' }).toString(),
@@ -50,26 +55,16 @@ app.post('/portal/login', async (req, res) => {
     });
     parseCookies(r2.headers);
 
-    // Step 3: Follow redirects manually until we get uname
-    let nextUrl = r2.headers.get('location');
-    let attempts = 0;
-    while (nextUrl && !jar['uname'] && attempts < 5) {
-      attempts++;
-      const fullUrl = nextUrl.startsWith('http') ? nextUrl : `${PORTAL}/${nextUrl.replace(/^\//, '')}`;
-      const rN = await fetch(fullUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookieStr() },
-        redirect: 'manual',
-      });
-      parseCookies(rN.headers);
-      nextUrl = rN.headers.get('location');
-    }
-
-    if (!jar['uname']) {
+    // Check uname (may have ! suffix)
+    const hasUname = Object.keys(jar).includes('uname');
+    if (!hasUname) {
       return res.status(401).json({ error: 'Login failed', jar });
     }
 
-    // Step 4: Fetch home page
-    const homeRes = await fetch(`${PORTAL}/index.php`, {
+    // Step 3: Follow redirect to index.php
+    const location = r2.headers.get('location') || 'index.php';
+    const homeUrl = location.startsWith('http') ? location : `${PORTAL}/${location.replace(/^\//, '')}`;
+    const homeRes = await fetch(homeUrl, {
       headers: { 'Cookie': cookieStr(), 'User-Agent': 'Mozilla/5.0' },
     });
     const html = await homeRes.text();
@@ -99,7 +94,7 @@ async function fetchPage(url, cookie) {
 function parseProfile(html) {
   function getField(...labels) {
     for (const label of labels) {
-      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = label.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
       const re = new RegExp(escaped + '[^<]*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,200})', 'i');
       const m = html.match(re);
       if (m && m[1].trim()) return m[1].trim();
@@ -112,16 +107,16 @@ function parseProfile(html) {
   const studentId = getField('Student №', 'Student No', 'Student ID', 'Student');
   let major = null, year = null;
   if (program) {
-    const yearMatch = program.match(/-\s*(\d+)\s*$/);
+    const yearMatch = program.match(/-\\s*(\\d+)\\s*$/);
     if (yearMatch) {
       const n = parseInt(yearMatch[1]);
       year = `${n}${['st','nd','rd'][n-1]||'th'} Year`;
-      major = program.replace(/-\s*\d+\s*$/, '').trim();
+      major = program.replace(/-\\s*\\d+\\s*$/, '').trim();
     } else { major = program; }
   }
-  const photoMatch = html.match(/stud_photo\.php\?[^"'\s>]+/);
+  const photoMatch = html.match(/stud_photo\\.php\\?[^"'\\s>]+/);
   const photo = photoMatch ? `${PORTAL}/${photoMatch[0]}` : null;
-  const gpaMatch = html.match(/GPA[^<\d]*([\d]+\.[\d]+)/i);
+  const gpaMatch = html.match(/GPA[^<\\d]*([\\d]+\\.[\\d]+)/i);
   const gpa = gpaMatch ? gpaMatch[1] : null;
   return { name, major, year, email, studentId, photo, gpa };
 }
@@ -129,14 +124,14 @@ function parseProfile(html) {
 function parseCurriculum(html) {
   if (!html) return [];
   const courses = [];
-  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const rowRe = /<tr[^>]*>([\\s\\S]*?)<\\/tr>/gi;
   let m;
   while ((m = rowRe.exec(html)) !== null) {
     const cells = [];
-    const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    const cellRe = /<td[^>]*>([\\s\\S]*?)<\\/td>/gi;
     let c;
     while ((c = cellRe.exec(m[1])) !== null) cells.push(c[1].replace(/<[^>]+>/g, '').trim());
-    if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\s*\d+/.test(cells[1])) {
+    if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\\s*\\d+/.test(cells[1])) {
       courses.push({ code: cells[1], name: cells[2]||'', credits: cells[4]||'', grade: cells[6]||'', status: cells[8]||'' });
     }
   }
@@ -146,14 +141,14 @@ function parseCurriculum(html) {
 function parseGrades(html) {
   if (!html) return [];
   const grades = [];
-  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const rowRe = /<tr[^>]*>([\\s\\S]*?)<\\/tr>/gi;
   let m;
   while ((m = rowRe.exec(html)) !== null) {
     const cells = [];
-    const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    const cellRe = /<td[^>]*>([\\s\\S]*?)<\\/td>/gi;
     let c;
     while ((c = cellRe.exec(m[1])) !== null) cells.push(c[1].replace(/<[^>]+>/g, '').trim());
-    if (cells.length >= 3 && /^\d+$/.test(cells[0])) {
+    if (cells.length >= 3 && /^\\d+$/.test(cells[0])) {
       grades.push({ semester: cells[1]||'', code: cells[2]||'', name: cells[3]||'', credits: cells[4]||'', grade: cells[5]||'', gpa: cells[6]||'' });
     }
   }
@@ -162,3 +157,4 @@ function parseGrades(html) {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`SDU Proxy running on port ${PORT}`));
+

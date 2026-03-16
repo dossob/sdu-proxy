@@ -22,19 +22,14 @@ app.post('/portal/login', async (req, res) => {
       raw.forEach(c => {
         const [pair] = c.split(';');
         const eqIdx = pair.indexOf('=');
-        if (eqIdx > 0) {
-          jar[pair.substring(0, eqIdx).trim()] = pair.substring(eqIdx + 1).trim();
-        }
+        if (eqIdx > 0) jar[pair.substring(0, eqIdx).trim()] = pair.substring(eqIdx + 1).trim();
       });
     }
     function cookieStr() {
       return Object.entries(jar).map(([k,v]) => k+'='+v).join('; ');
     }
 
-    const r1 = await fetch(PORTAL + '/', {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      redirect: 'follow',
-    });
+    const r1 = await fetch(PORTAL + '/', { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' });
     parseCookies(r1.headers);
 
     const r2 = await fetch(PORTAL + '/loginAuth.php', {
@@ -52,22 +47,22 @@ app.post('/portal/login', async (req, res) => {
     parseCookies(r2.headers);
 
     if (!jar['uname']) {
-      return res.status(401).json({ error: 'Login failed', jar });
+      return res.status(401).json({ error: 'Login failed. Wrong credentials.' });
     }
 
-    const location = r2.headers.get('location') || 'index.php';
-    const homeUrl = location.startsWith('http') ? location : PORTAL + '/' + location.replace(/^\//, '');
-    const homeRes = await fetch(homeUrl, {
+    // Fetch profile page
+    const profileRes = await fetch(PORTAL + '/index.php?mod=profile', {
       headers: { 'Cookie': cookieStr(), 'User-Agent': 'Mozilla/5.0' },
     });
-    const html = await homeRes.text();
+    const profileHtml = await profileRes.text();
+    const student = parseProfile(profileHtml);
 
-    if (req.query.debug) return res.json({ html: html.substring(0, 5000), cookies: cookieStr(), jar });
-
-    const student = parseProfile(html);
+    // Fetch curriculum
     const currHtml = await fetchPage(PORTAL + '/index.php?mod=course_struct', cookieStr());
     const curriculum = parseCurriculum(currHtml);
-    const gradeHtml = await fetchPage(PORTAL + '/index.php?mod=transcript', cookieStr());
+
+    // Fetch grades
+    const gradeHtml = await fetchPage(PORTAL + '/index.php?mod=transkript', cookieStr());
     const grades = parseGrades(gradeHtml);
 
     res.json({ success: true, student, curriculum, grades });
@@ -85,33 +80,39 @@ async function fetchPage(url, cookie) {
 }
 
 function parseProfile(html) {
-  function getField() {
-    for (let i = 0; i < arguments.length; i++) {
-      const label = arguments[i];
-      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(escaped + '[^<]*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,200})', 'i');
-      const m = html.match(re);
-      if (m && m[1].trim()) return m[1].trim();
-    }
-    return null;
+  function getField(label) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escaped + '\\s*:\\s*<\\/td>\\s*<td[^>]*>\\s*([^<]{1,200})', 'i');
+    const m = html.match(re);
+    return m ? m[1].trim() : null;
   }
-  const name = getField('Fullname', 'Name Surname', 'Full name');
-  const program = getField('Program / Class', 'Major Program', 'Program');
-  const email = getField('Email', 'E-mail');
-  const studentId = getField('Student \u2116', 'Student No', 'Student ID', 'Student');
+
+  const name = getField('Name Surname');
+  const program = getField('Major Program');
+  const email = getField('Email');
+  const studentId = getField('Student');
+
   let major = null, year = null;
   if (program) {
-    const yearMatch = program.match(/-\s*(\d+)\s*$/);
+    // "Бағдарламалық қамтамасыз ету-EN / 2024" → extract year from 2024
+    const yearMatch = program.match(/\/\s*(\d{4})/);
     if (yearMatch) {
-      const n = parseInt(yearMatch[1]);
+      const startYear = parseInt(yearMatch[1]);
+      const currentYear = new Date().getFullYear();
+      const n = currentYear - startYear + 1;
       year = n + (['st','nd','rd'][n-1]||'th') + ' Year';
-      major = program.replace(/-\s*\d+\s*$/, '').trim();
-    } else { major = program; }
+    }
+    // Extract major — remove year part
+    major = program.replace(/[-–]\s*EN.*$/i, '').replace(/\/\s*\d{4}.*$/, '').trim();
+    if (program.includes('EN')) major = major + ' (EN)';
   }
+
   const photoMatch = html.match(/stud_photo\.php\?[^"'\s>]+/);
   const photo = photoMatch ? PORTAL + '/' + photoMatch[0] : null;
+
   const gpaMatch = html.match(/GPA[^<\d]*([\d]+\.[\d]+)/i);
   const gpa = gpaMatch ? gpaMatch[1] : null;
+
   return { name, major, year, email, studentId, photo, gpa };
 }
 
@@ -123,10 +124,17 @@ function parseCurriculum(html) {
     const cells = [];
     const cellMatches = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
     cellMatches.forEach(function(cell) {
-      cells.push(cell.replace(/<[^>]+>/g, '').trim());
+      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').trim());
     });
     if (cells.length >= 3 && cells[1] && /^[A-Z]{2,4}\s*\d+/.test(cells[1])) {
-      courses.push({ code: cells[1], name: cells[2]||'', credits: cells[4]||'', grade: cells[6]||'', status: cells[8]||'' });
+      const grade = (cells[6] || '').replace(/\s+/g, ' ').trim();
+      courses.push({
+        code: cells[1],
+        name: cells[2] || '',
+        credits: cells[4] || '',
+        grade: grade,
+        status: (cells[8] || '').replace(/\s+/g, ' ').trim(),
+      });
     }
   });
   return courses;
@@ -140,10 +148,18 @@ function parseGrades(html) {
     const cells = [];
     const cellMatches = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
     cellMatches.forEach(function(cell) {
-      cells.push(cell.replace(/<[^>]+>/g, '').trim());
+      cells.push(cell.replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, '').trim());
     });
-    if (cells.length >= 3 && /^\d+$/.test(cells[0])) {
-      grades.push({ semester: cells[1]||'', code: cells[2]||'', name: cells[3]||'', credits: cells[4]||'', grade: cells[5]||'', gpa: cells[6]||'' });
+    if (cells.length >= 5 && /^\d+$/.test(cells[0])) {
+      grades.push({
+        no: cells[0],
+        semester: cells[1] || '',
+        code: cells[2] || '',
+        name: cells[3] || '',
+        credits: cells[4] || '',
+        grade: cells[5] || '',
+        gpa: cells[6] || '',
+      });
     }
   });
   return grades;

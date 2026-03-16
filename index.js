@@ -16,54 +16,70 @@ app.post('/portal/login', async (req, res) => {
     if (!username || !password) return res.status(400).json({ error: 'credentials required' });
     const cleanUser = username.includes('@') ? username.split('@')[0] : username;
 
-    // Step 1: GET index.php to obtain PHPSESSID
-    const initRes = await fetch(`${PORTAL}/index.php`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    const jar = {};
+    function parseCookies(headers) {
+      const raw = headers.raw()['set-cookie'] || [];
+      raw.forEach(c => {
+        const [pair] = c.split(';');
+        const [k, v] = pair.split('=');
+        if (k && v !== undefined) jar[k.trim()] = v.trim();
+      });
+    }
+    function cookieStr() {
+      return Object.entries(jar).map(([k,v]) => `${k}=${v}`).join('; ');
+    }
+
+    // Step 1: GET login page → get initial PHPSESSID
+    const r1 = await fetch(`${PORTAL}/`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
       redirect: 'follow',
     });
-    const initCookies = (initRes.headers.raw()['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+    parseCookies(r1.headers);
 
-    // Step 2: POST loginAuth.php with PHPSESSID
-    const loginRes = await fetch(`${PORTAL}/loginAuth.php`, {
+    // Step 2: POST credentials
+    const r2 = await fetch(`${PORTAL}/loginAuth.php`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': `${PORTAL}/index.php`,
-        'Origin': PORTAL,
-        'Cookie': initCookies,
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': `${PORTAL}/`,
+        'Cookie': cookieStr(),
       },
-      body: new URLSearchParams({
-        username: cleanUser,
-        password,
-        modstring: '',
-        LogIn: 'Log in',
-      }).toString(),
+      body: new URLSearchParams({ username: cleanUser, password, modstring: '', LogIn: 'Log in' }).toString(),
       redirect: 'manual',
     });
+    parseCookies(r2.headers);
 
-    // Step 3: Collect all cookies
-    const allCookies = [...initCookies.split('; ')];
-    const loginCookies = (loginRes.headers.raw()['set-cookie'] || []).map(c => c.split(';')[0]);
-    loginCookies.forEach(c => { if (c && !allCookies.includes(c)) allCookies.push(c); });
-    const cookieHeader = allCookies.filter(Boolean).join('; ');
+    // Step 3: Follow redirects manually until we get uname
+    let nextUrl = r2.headers.get('location');
+    let attempts = 0;
+    while (nextUrl && !jar['uname'] && attempts < 5) {
+      attempts++;
+      const fullUrl = nextUrl.startsWith('http') ? nextUrl : `${PORTAL}/${nextUrl.replace(/^\//, '')}`;
+      const rN = await fetch(fullUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookieStr() },
+        redirect: 'manual',
+      });
+      parseCookies(rN.headers);
+      nextUrl = rN.headers.get('location');
+    }
 
-    if (!cookieHeader.includes('uname')) {
-      return res.status(401).json({ error: 'Login failed. Wrong credentials.', cookies: cookieHeader });
+    if (!jar['uname']) {
+      return res.status(401).json({ error: 'Login failed', jar });
     }
 
     // Step 4: Fetch home page
     const homeRes = await fetch(`${PORTAL}/index.php`, {
-      headers: { 'Cookie': cookieHeader, 'User-Agent': 'Mozilla/5.0' },
+      headers: { 'Cookie': cookieStr(), 'User-Agent': 'Mozilla/5.0' },
     });
     const html = await homeRes.text();
 
-    if (req.query.debug) return res.json({ html: html.substring(0, 4000), cookies: cookieHeader });
+    if (req.query.debug) return res.json({ html: html.substring(0, 5000), cookies: cookieStr(), jar });
 
     const student = parseProfile(html);
-    const currHtml = await fetchPage(`${PORTAL}/index.php?mod=course_struct`, cookieHeader);
+    const currHtml = await fetchPage(`${PORTAL}/index.php?mod=course_struct`, cookieStr());
     const curriculum = parseCurriculum(currHtml);
-    const gradeHtml = await fetchPage(`${PORTAL}/index.php?mod=transcript`, cookieHeader);
+    const gradeHtml = await fetchPage(`${PORTAL}/index.php?mod=transcript`, cookieStr());
     const grades = parseGrades(gradeHtml);
 
     res.json({ success: true, student, curriculum, grades });
